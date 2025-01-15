@@ -3,7 +3,8 @@
 /pretrained_models/*
 <<<<<<< Updated upstream
 /raw_data/*
-*.ipynb
+./*.ipynb
 =======
 /raw_data/*
 >>>>>>> Stashed changes
+./*.zip
