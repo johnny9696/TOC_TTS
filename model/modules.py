@@ -113,7 +113,7 @@ class VarianceAdaptor(nn.Module):
         d_control=1.0,
     ):
 
-        log_duration_prediction = self.duration_predictor(x, src_mask)
+
         #nope version has no pitch energy
 
         if self.pitch_feature_level == "phoneme_level":
@@ -127,6 +127,7 @@ class VarianceAdaptor(nn.Module):
             )
             x = x + energy_embedding
 
+        log_duration_prediction = self.duration_predictor(x, src_mask)
         if duration_target is not None:
             x, mel_len = self.length_regulator(x, duration_target, max_len)
             duration_rounded = duration_target

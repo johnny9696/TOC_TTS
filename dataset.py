@@ -8,7 +8,9 @@ from torch.utils.data import Dataset
 
 from text import text_to_sequence
 from utils.tools import pad_1D, pad_2D
-
+from string import punctuation
+import re
+from g2p_en import G2p
 
 class Dialogue_dataset(Dataset):
     def __init__(self, text_path, model_config, preprocess_config):
@@ -192,7 +194,10 @@ class Dialogue_dataset(Dataset):
                            t_duration, token_dur, pitch, energy, cutmel,
                            cut_w2v))
         return output
-class Dialogue_dataset_eval(Dataset):
+
+
+
+class Dialogue_dataset_neval(Dataset):
     def __init__(self, text_path, model_config, preprocess_config):
         self.bert_in = model_config["dialogue_predictor"]["bert_in"]
         self.sbert_in = model_config["dialogue_predictor"]["sbert_in"]
@@ -216,9 +221,25 @@ class Dialogue_dataset_eval(Dataset):
         if time == "cur":
             bert_path = os.path.join(self.processed_path, "BERT/bert-{}.npy".format(basename))
             sbert_path = os.path.join(self.processed_path, "SBERT/sbert-{}.npy".format(basename))
+            p_duration_path = os.path.join(self.processed_path,"duration_phone/duration-phone-{}.npy".format(basename))
+            t_duration_path = os.path.join(self.processed_path,"duration_token/duration-token-{}.npy".format(basename))
+            pitch_path = os.path.join(self.processed_path,"pitch/pitch-{}.npy".format(basename))
+            energy_path = os.path.join(self.processed_path,"energy/energy-{}.npy".format(basename))
+            mel_path = os.path.join(self.processed_path,"mel/mel-{}.npy".format(basename))
+            #cut_w2vser_path = os.path.join(self.processed_path,"CUTW2VSER/cutw2vser-{}.npy".format(basename))
+            cut_token_w2vser_path = os.path.join(self.processed_path,"CUTTOKENW2VSER/cuttokenw2vser-{}.npy".format(basename))
+            #w2vser_path = os.path.join(self.processed_path,'W2VSER/w2vser-{}.npy'.format(basename))
             bert = np.load(bert_path)
             sbert = np.load(sbert_path)
-            return (bert, sbert)
+            p_duration = np.load(p_duration_path)
+            t_duration = np.load(t_duration_path)
+            pitch = np.load(pitch_path)
+            energy = np.load(energy_path)
+            mel = np.load(mel_path)
+            #cut_w2vser = np.load(cut_w2vser_path)
+            cut_w2vser = np.load(cut_token_w2vser_path)
+            #w2vser = np.load(w2vser_path)
+            return (bert, sbert, p_duration, t_duration, pitch, energy, mel, cut_w2vser)
 
         elif time == "history":
             bert_path = os.path.join(self.processed_path, "BERT/bert-{}.npy".format(basename))
@@ -226,13 +247,24 @@ class Dialogue_dataset_eval(Dataset):
             bert = np.load(bert_path)
             sbert = np.load(sbert_path)
             return (bert, sbert)
+    def cutmel(self, mel, duration):
+        max_dur = max(duration)
+        cutmel = np.zeros((len(duration), max_dur, self.n_mels))
+        sf = 0
+        for indx, length in enumerate(duration):
+            cutmel[indx, :length, :] = mel[sf:sf+length, :]
+            sf = sf + length
+        return cutmel, max_dur
 
     def get_cur(self, basename, phone, token_dur):
-        (bert, sbert) = self.get_path_and_load(basename, time = "cur")
+        (bert, sbert, p_duration, t_duration, pitch, energy, mel, cut_w2vser) = self.get_path_and_load(basename, time = "cur")
         bert_length = np.shape(bert)[0]
         phone = np.array(text_to_sequence(phone, self.cleaners))
         text_length = np.shape(phone)[0]
-        return (phone, text_length, bert, bert_length, sbert)
+        mel_length = np.shape(mel)[0]
+        cutmel, cutmel_dur = self.cutmel(mel, t_duration)
+        token_dur = list(map(int, token_dur.split(" ")))
+        return (phone, text_length, bert, bert_length, sbert, p_duration, t_duration, pitch, energy, mel, mel_length, token_dur, cutmel, cutmel_dur, cut_w2vser)
 
     def get_hist(self, basename):
         history_basename = list()
@@ -280,16 +312,241 @@ class Dialogue_dataset_eval(Dataset):
 
     def get_all(self, data):
         basename, speaker, phone, raw_text, token_dur = data.split("|")
-        (text, text_length, bert, bert_length, sbert) = self.get_cur(basename, phone, token_dur)
+        (text, text_length, bert, bert_length, sbert, p_duration, t_duration, pitch, energy, mel, mel_length, token_dur, cutmel, cutmel_dur, cut_w2vser) = self.get_cur(basename, phone, token_dur)
         (h_bert, h_bert_length, h_sbert, h_speaker) = self.get_hist(basename)
-        return (text, text_length, bert, bert_length, sbert, h_bert, h_bert_length, h_sbert, speaker, h_speaker, basename )
+        return (text, text_length, bert, bert_length, sbert, h_bert, h_bert_length, h_sbert, speaker, h_speaker, mel, mel_length, p_duration, t_duration, token_dur, pitch, energy, cutmel, cutmel_dur, cut_w2vser, basename)
 
     def __len__(self):
         return len(self.data_path)
     def __getitem__(self, indx):
         return self.get_all(self.data_path[indx])
     def collate_fn(self, batch):
-        """(text, text_length, bert, bert_length, sbert, h_bert, h_bert_length, h_sbert, speaker, h_speaker, basename )"""
+        """(text, text_length, bert, bert_length, sbert,
+        h_bert, h_bert_length, h_sbert, speaker, h_speaker,
+        mel, mel_length, p_duration, t_duration, token_dur,
+        pitch, energy, cutmel, cutmel_dur, cut_w2vser,
+        basename)"""
+        batch_size = len(batch)
+        # get length
+        text_length = [batch[i][1] for i in range(batch_size)]
+        bert_length = [batch[i][3] for i in range(batch_size)]
+        h_bert_length = [batch[i][6] for i in range(batch_size)]
+        mel_length = [batch[i][11] for i in range(batch_size)]
+        cutmel_length = [batch[i][18] for i in range(batch_size)]
+        basename_list = [batch[i][20] for i in range(batch_size)]
+        max_text_length = max(text_length)
+        max_bert_length = max(max(bert_length), max(h_bert_length))
+        max_mel_length = max(mel_length)
+        max_cutmel_length = max(cutmel_length)
+
+        output = list()
+        for i in range(batch_size):
+            t_length = torch.tensor(text_length[i], dtype=torch.int).unsqueeze(0)
+            b_length = torch.tensor(bert_length[i], dtype = torch.int).unsqueeze(0)
+            speaker = torch.tensor(int(batch[i][8]), dtype = torch.long).unsqueeze(0)
+            h_speaker = torch.tensor(batch[i][9], dtype = torch.long).unsqueeze(0)
+            m_length = torch.tensor(mel_length[i], dtype = torch.int).unsqueeze(0)
+            text = torch.zeros((1, max_text_length), dtype= torch.long)
+            bert = torch.zeros((1, max_bert_length, self.bert_in), dtype = torch.float)
+            sbert = torch.zeros((1, self.sbert_in), dtype = torch.float)
+            h_bert = torch.zeros((1, self.history_length, max_bert_length, self.bert_in))
+            h_sbert = torch.zeros((1, self.history_length, self.sbert_in), dtype = torch.float)
+            mel = torch.zeros((1, max_mel_length, self.n_mels), dtype = torch.float)
+            cutmel = torch.zeros((1, max_bert_length, max_cutmel_length, self.n_mels), dtype = torch.float)
+            p_duration = torch.zeros((1, max_text_length), dtype = torch.float)
+            t_duration = torch.zeros((1, max_text_length), dtype = torch.float)
+            token_dur = torch.zeros((1, max_bert_length), dtype = torch.float)
+            pitch = torch.zeros((1, max_text_length), dtype = torch.float)
+            energy = torch.zeros((1, max_text_length), dtype = torch.float)
+            cut_w2v = torch.zeros((1, max_bert_length, 768), dtype = torch.float)
+            #w2vser = torch.zeros((1,768), dtype = torch.float)
+
+            text[0, :text_length[i]] = torch.from_numpy(batch[i][0])
+            bert[0, :bert_length[i], :] = torch.from_numpy(batch[i][2])
+            sbert[0, :] = torch.from_numpy(batch[i][4])
+            h_bert[0, :, :h_bert_length[i], :] = torch.tensor(batch[i][5], dtype = torch.float)
+            h_sbert[0, :, :] = torch.tensor(batch[i][7], dtype = torch.float)
+            mel[0, :mel_length[i], :] = torch.tensor(batch[i][10], dtype = torch.float)
+            cutmel[0, :bert_length[i], :cutmel_length[i], :] = torch.tensor(batch[i][17])
+            p_duration[0, :text_length[i]] = torch.tensor(batch[i][12], dtype = torch.float)
+            t_duration[0, :bert_length[i]] = torch.tensor(batch[i][13], dtype = torch.float)
+            token_dur[0, :bert_length[i]] = torch.tensor(batch[i][14], dtype = torch.float)
+            pitch[0, :text_length[i]] = torch.tensor(batch[i][15], dtype = torch.float)
+            energy[0, :text_length[i]] = torch.tensor(batch[i][16], dtype = torch.float)
+            cut_w2v[0,:bert_length[i],:] = torch.tensor(batch[i][19], dtype = torch.float)
+            #w2vser[0, : ]= torch.tensor(batch[i][19], dtype = torch.float)
+            output.append((text, t_length, torch.tensor(max_text_length), bert, b_length,
+                           torch.tensor(max_bert_length), sbert, h_bert, h_sbert, speaker,
+                           h_speaker, mel, m_length, torch.tensor(max_mel_length), p_duration,
+                           t_duration, token_dur, pitch, energy, cutmel,
+                           cut_w2v))
+        return output, basename_list
+
+
+class Dialogue_dataset_eval(Dataset):
+    def __init__(self, text_path, model_config, preprocess_config):
+        self.bert_in = model_config["dialogue_predictor"]["bert_in"]
+        self.sbert_in = model_config["dialogue_predictor"]["sbert_in"]
+        self.history_length = model_config["dialogue_predictor"]["history_length"]
+        self.n_mels = model_config["dialogue_predictor"]["n_mels"]
+        self.n_speakers = model_config["n_speaker"]
+        self.processed_path = preprocess_config["path"]["preprocessed_path"]
+        self.data_path = self.load(os.path.join(preprocess_config["path"]["preprocessed_path"], text_path))
+        self.corpus_path = preprocess_config["path"]["corpus_path"]
+        path = os.path.join(preprocess_config["path"]["preprocessed_path"],"fullbase.txt")
+        with open(path, 'r', encoding="UTF-8") as f:
+            self.full_name = f.read().split("\n")
+        self.cleaners = preprocess_config["preprocessing"]["text"]["text_cleaners"]
+        self.lexi_path = preprocess_config["path"]["lexicon_path"]
+    def load(self, path):
+        with open(path, 'r', encoding='UTF-8') as f:
+            data = f.read().split("\n")
+        data.pop()
+        return data
+
+    def get_path_and_load(self, basename, time):
+        if time == "cur":
+            bert_path = os.path.join(self.processed_path, "BERT/bert-{}.npy".format(basename))
+            sbert_path = os.path.join(self.processed_path, "SBERT/sbert-{}.npy".format(basename))
+            t_duration_path = os.path.join(self.processed_path, "duration_token/duration-token-{}.npy".format(basename))
+            mel_path = os.path.join(self.processed_path, "mel/mel-{}.npy".format(basename))
+            bert = np.load(bert_path)
+            sbert = np.load(sbert_path)
+            mel = np.load(mel_path)
+            t_duration = np.load(t_duration_path)
+            return (bert, sbert, mel, t_duration)
+
+        elif time == "history":
+            bert_path = os.path.join(self.processed_path, "BERT/bert-{}.npy".format(basename))
+            sbert_path = os.path.join(self.processed_path, "SBERT/sbert-{}.npy".format(basename))
+            bert = np.load(bert_path)
+            sbert = np.load(sbert_path)
+            return (bert, sbert)
+
+    def get_cur(self, basename, phone, token_dur):
+        (bert, sbert, mel, t_duration) = self.get_path_and_load(basename, time = "cur")
+        bert_length = np.shape(bert)[0]
+        #phone = np.array(text_to_sequence(phone, self.cleaners))
+        text_length = np.shape(phone)[0]
+        cutmel, cutmel_dur = self.cutmel(mel, t_duration)
+        return (phone, text_length, bert, bert_length, sbert, cutmel, cutmel_dur)
+
+    def cutmel(self, mel, duration):
+        max_dur = max(duration)
+        cutmel = np.zeros((len(duration), max_dur, self.n_mels))
+        sf = 0
+        for indx, length in enumerate(duration):
+            cutmel[indx, :length, :] = mel[sf:sf+length, :]
+            sf = sf + length
+        return cutmel, max_dur
+
+    def get_hist(self, basename):
+        history_basename = list()
+        h_speaker = list()
+        #turn, speaker, dialoguenum
+        c_turn, c_speaker, c_dialogue_num = basename.split("_")
+        if int(c_turn) < self.history_length:
+            s_turn = 0
+            end_turn = int(c_turn)
+            for i in range(self.history_length - end_turn):
+                history_basename.append(None)
+                h_speaker.append(self.n_speakers)
+        else:
+            s_turn = int(c_turn) - self.history_length
+            end_turn = int(c_turn)
+        for turn in range(s_turn, end_turn):
+            for speaker in range(self.n_speakers):
+                h_base = "_".join([str(turn), str(speaker), c_dialogue_num])
+                if h_base in self.full_name:
+                    history_basename.append(h_base)
+                    h_speaker.append(speaker)
+
+        bert_list = list()
+        sbert_list = list()
+        bert_length = list()
+        for name in history_basename:
+            if name is not None:
+                (bert, sbert) = self.get_path_and_load(name ,"history")
+                bert_list.append(bert)
+                sbert_list.append(sbert)
+                bert_length.append(np.shape(bert)[0])
+            else:
+                bert_list.append(np.zeros((1, self.bert_in)))
+                sbert_list.append(np.zeros(self.sbert_in))
+                bert_length.append(0)
+
+        pad_bert = np.zeros((self.history_length, max(bert_length), self.bert_in))
+        pad_sbert = np.zeros((self.history_length, self.sbert_in))
+
+        for i in range(self.history_length):
+            if history_basename[i] is not None:
+                pad_bert[i, :bert_length[i], :] = bert_list[i]
+                pad_sbert[i, :] = sbert_list[i]
+        return (pad_bert, max(bert_length), pad_sbert, h_speaker)
+
+    def read_lexicon(self,):
+        lexicon = {}
+        with open(self.lexi_path) as f:
+            for line in f:
+                temp = re.split(r"\s+", line.strip("\n"))
+                word = temp[0]
+                phones = temp[1:]
+                if word.lower() not in lexicon:
+                    lexicon[word.lower()] = phones
+        return lexicon
+
+    def preprocess_english(self,text):
+        text = text.rstrip(punctuation)
+        lexicon = self.read_lexicon()
+
+        g2p = G2p()
+        phones = []
+        words = re.split(r"([,;.\-\?\!\s+])", text)
+        for w in words:
+            if w.lower() in lexicon:
+                phones += lexicon[w.lower()]
+            else:
+                phones += list(filter(lambda p: p != " ", g2p(w)))
+        phones = "{" + "}{".join(phones) + "}"
+        phones = re.sub(r"\{[^\w\s]?\}", "{sp}", phones)
+        phones = phones.replace("}{", " ")
+
+        print("Raw Text Sequence: {}".format(text))
+        print("Phoneme Sequence: {}".format(phones))
+        sequence = np.array(
+            text_to_sequence(
+                phones, self.cleaners
+            )
+        )
+
+        return np.array(sequence)
+
+    def get_text(self, basename):
+        turn, speaker, dialogue = basename.split("_")
+        d_num = dialogue[1:]
+        text_path = os.path.join(self.corpus_path, "data", d_num, basename+".txt")
+        with open(text_path,"r",encoding="UTF-8") as f:
+            raw_text = f.read()
+        phone = self.preprocess_english(raw_text)
+        return phone
+
+    def get_all(self, data):
+        basename, speaker, _, _, token_dur = data.split("|")
+        phone = self.get_text(basename)
+        (text, text_length, bert, bert_length, sbert, cutmel, cutmel_dur)= self.get_cur(basename, phone, token_dur)
+        (h_bert, h_bert_length, h_sbert, h_speaker) = self.get_hist(basename)
+        return (text, text_length, bert, bert_length, sbert,
+                h_bert, h_bert_length, h_sbert, speaker, h_speaker,
+                cutmel, cutmel_dur, basename )
+
+    def __len__(self):
+        return len(self.data_path)
+    def __getitem__(self, indx):
+        return self.get_all(self.data_path[indx])
+    def collate_fn(self, batch):
+        """((text, text_length, bert, bert_length, sbert,
+        h_bert, h_bert_length, h_sbert, speaker, h_speaker,
+        cutmel, cutmel_dur, basename )"""
         batch_size = len(batch)
         # get length
         text_length = [batch[i][1] for i in range(batch_size)]
@@ -297,7 +554,9 @@ class Dialogue_dataset_eval(Dataset):
         h_bert_length = [batch[i][6] for i in range(batch_size)]
         max_text_length = max(text_length)
         max_bert_length = max(max(bert_length), max(h_bert_length))
-        basename = [batch[i][10] for i in range(batch_size)]
+        cutmel_length = [batch[i][11] for i in range(batch_size)]
+        max_cutmel_length = max(cutmel_length)
+        basename = [batch[i][12] for i in range(batch_size)]
 
         output = list()
         for i in range(batch_size):
@@ -310,20 +569,21 @@ class Dialogue_dataset_eval(Dataset):
             sbert = torch.zeros((1, self.sbert_in), dtype = torch.float)
             h_bert = torch.zeros((1, self.history_length, max_bert_length, self.bert_in))
             h_sbert = torch.zeros((1, self.history_length, self.sbert_in), dtype = torch.float)
+            cutmel = torch.zeros((1, max_bert_length, max_cutmel_length, self.n_mels), dtype=torch.float)
 
             text[0, :text_length[i]] = torch.from_numpy(batch[i][0])
             bert[0, :bert_length[i], :] = torch.from_numpy(batch[i][2])
             sbert[0, :] = torch.from_numpy(batch[i][4])
             h_bert[0, :, :h_bert_length[i], :] = torch.tensor(batch[i][5], dtype = torch.float)
             h_sbert[0, :, :] = torch.tensor(batch[i][7], dtype = torch.float)
-
+            cutmel[0, :bert_length[i], :cutmel_length[i], :] = torch.tensor(batch[i][10])
             output.append((text, t_length, torch.tensor(max_text_length), bert, b_length,
                            torch.tensor(max_bert_length), sbert, h_bert, h_sbert, speaker,
                            h_speaker, None, None, None, None,
-                           None, None, None, None, None,
+                           None, None, None, None, cutmel,
                            None))
         return output, basename
-
+    
 class Dataset(Dataset):
     def __init__(
         self, filename, preprocess_config, train_config, sort=False, drop_last=False

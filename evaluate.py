@@ -1,5 +1,6 @@
 import argparse
 import os
+import numpy as np
 
 import torch
 import yaml
@@ -7,10 +8,12 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 from utils.model import get_model, get_vocoder
-from utils.tools import to_device, log, synth_one_sample
+from utils.tools import to_device, log, synth_one_sample, to_device_eval, synth_samples
 from model import FittedLoss
-from dataset import Dialogue_dataset
+from dataset import Dialogue_dataset, Dialogue_dataset_neval
 
+from scipy.io import wavfile
+from utils.model import vocoder_infer
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -19,8 +22,8 @@ def evaluate(model, step, configs, logger=None, vocoder=None):
     preprocess_config, model_config, train_config = configs
 
     # Get dataset
-    dataset = Dialogue_dataset(
-        "val.txt", model_config, preprocess_config )
+    dataset = Dialogue_dataset_neval(
+        "dialogue_val.txt", model_config, preprocess_config )
     batch_size = train_config["optimizer"]["batch_size"]
     loader = DataLoader(
         dataset,
@@ -33,8 +36,8 @@ def evaluate(model, step, configs, logger=None, vocoder=None):
     Loss = FittedLoss(preprocess_config, model_config, train_config).to(device)
 
     # Evaluation
-    loss_sums = [0 for _ in range(8)]
-    for batchs in loader:
+    loss_sums = [0 for _ in range(9)]
+    for batchs, basename_list in loader:
         for batch in batchs:
             batch = to_device(batch, device)
             with torch.no_grad():
@@ -50,14 +53,10 @@ def evaluate(model, step, configs, logger=None, vocoder=None):
 
     loss_means = [loss_sum / len(dataset) for loss_sum in loss_sums]
 
-    message = "Validation Step {}, Total Loss: {:.4f}, Mel Loss: {:.4f},  Mel MLE Loss: {:.4f},  Pitch Loss: {:.4f}, Energy Loss: {:.4f}, Duration Loss: {:.4f}, Token Duration Loss: {:.4f}, Condition Loss: {:.4f}".format(
+    message = "Validation Step {}, Total Loss: {:.4f}, Mel Loss: {:.4f}, Post Mel Loss: {:.4f},  Mel MLE Loss: {:.4f},  Pitch Loss: {:.4f}, Energy Loss: {:.4f}, Duration Loss: {:.4f}, Token Duration Loss: {:.4f}, Condition Loss: {:.4f}".format(
         *([step] + [l for l in loss_means])
     )
-    """
-    message = "Validation Step {}, Total Loss: {:.4f}, Mel Loss: {:.4f},  Duration Loss: {:.4f}, Token Duration Loss: {:.4f}, Condition Loss: {:.4f}".format(
-        *([step] + [l for l in loss_means])
-    )
-    """
+
     with torch.no_grad():
         output1 = model(*(batch), gen=True, steps=step)
     if logger is not None:
@@ -98,6 +97,22 @@ def evaluate(model, step, configs, logger=None, vocoder=None):
             tag="Validation/synthesized_prosody",
             step = step
         )
+
+    if step % train_config["step"]["save_step"] == 0:
+        with torch.no_grad():
+            for batchs, basename_list in loader:
+                for indx, batch in enumerate(batchs):
+                    batch = to_device_eval(batch, device)
+                    try :
+                        with torch.no_grad():
+                            # Forward
+                            output = model(*(batch), gen=True, steps=step)
+                            wav_predictions = vocoder_infer(
+                                output[1], vocoder, model_config, preprocess_config )
+                            wavfile.write(os.path.join(train_config["path"]["result_path"], "{}.wav".format(basename_list[indx])), 22050, np.array(wav_predictions))
+                    except:
+                        print(basename_list[indx])
+
 
     return message
 

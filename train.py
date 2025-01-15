@@ -1,5 +1,7 @@
 import argparse
 import os
+from scipy.io import wavfile
+from utils.model import vocoder_infer
 
 import torch
 import yaml
@@ -9,9 +11,9 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 
 from utils.model import get_model, get_vocoder, get_param_num
-from utils.tools import to_device, log, synth_one_sample
-from model import FittedLoss
-from dataset import Dialogue_dataset
+from utils.tools import to_device, log, synth_one_sample, to_device_eval
+from model import FittedLoss, Fitted_DT
+from dataset import Dialogue_dataset, Dialogue_dataset_neval
 
 from evaluate import evaluate
 
@@ -25,7 +27,7 @@ def main(args, configs):
 
     # Get dataset
     dataset = Dialogue_dataset(
-        "train.txt", model_config, preprocess_config )
+        "dialogue_train.txt", model_config, preprocess_config )
     batch_size = train_config["optimizer"]["batch_size"]
     assert batch_size< len(dataset)
     loader = DataLoader(
@@ -100,18 +102,15 @@ def main(args, configs):
                     optimizer.step_and_update_lr()
                     optimizer.zero_grad()
 
+
                 if step % log_step == 0:
                     losses = [l.item() for l in losses]
                     message1 = "Step {}/{}, ".format(step, total_step)
 
-                    message2 = "Total Loss: {:.4f}, Mel Loss: {:.4f}, Mel MLE Loss: {:.4f}, Pitch Loss: {:.4f}, Energy Loss: {:.4f}, Duration Loss: {:.4f}, Token Duration Loss: {:.4f},  Condition Loss: {:.4f}".format(
+                    message2 = "Total Loss: {:.4f}, Mel Loss: {:.4f}, Post Mel Loss: {:.4f}, Mel MLE Loss: {:.4f}, Pitch Loss: {:.4f}, Energy Loss: {:.4f}, Duration Loss: {:.4f}, Token Duration Loss: {:.4f},  Condition Loss: {:.4f}".format(
                         *losses
                     )
-                    """
-                    message2 = "Total Loss: {:.4f}, Mel Loss: {:.4f},  Duration Loss: {:.4f}, Token Duration Loss: {:.4f},  Condition Loss: {:.4f}".format(
-                        *losses
-                    )
-                    """
+
                     with open(os.path.join(train_log_path, "log.txt"), "a") as f:
                         f.write(message1 + message2 + "\n")
 
@@ -181,6 +180,42 @@ def main(args, configs):
                             "{}.pth.tar".format(step),
                         ),
                     )
+
+                if step % train_config["step"]["mid_output"] == 0 :
+                    dataset_eval = Dialogue_dataset_neval(
+                        "dialogue_val.txt", model_config, preprocess_config)
+                    loader_eval = DataLoader(
+                        dataset_eval,
+                        batch_size=16,
+                        shuffle=False,
+                        collate_fn=dataset_eval.collate_fn,
+                        drop_last=False
+                    )
+
+
+                    for batchs_eval, basename_list in loader_eval:
+                        for indx, batch_eval in enumerate(batchs_eval):
+                            batch_eval = to_device(batch_eval, device)
+                            try:
+                                with torch.no_grad():
+                                    output_eval = model(*(batch_eval), gen=True, steps=10000)
+                                    mel_spec = output_eval[1]
+
+                                if vocoder is not None:
+                                    wav_prediction = vocoder_infer(
+                                        mel_spec,
+                                        vocoder,
+                                        model_config,
+                                        preprocess_config,
+                                    )[0]
+                                basename = basename_list[indx]
+                                data_path = basename.split("_")
+                                os.makedirs(os.path.join(train_config["path"]["result_path"], data_path[-1]), exist_ok=True)
+                                wav_path = os.path.join(train_config["path"]["result_path"], data_path[-1],
+                                                        basename + ".wav")
+                                wavfile.write(wav_path, 22050, wav_prediction)
+                            except :
+                                print("error on {}, {}".format(basename, mel_spec.size()))
 
                 if step == total_step:
                     quit()

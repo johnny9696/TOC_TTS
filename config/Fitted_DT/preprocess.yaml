@@ -1,7 +1,7 @@
 dataset: "DailyTalk_DT"
 
 path:
-  corpus_path: "/home/johnny9696/Desktop/DATA/dailytalk"
+  corpus_path: "/home/johnny9696/Desktop/DATA/dailytalk/"
   lexicon_path: "lexicon/librispeech-lexicon.txt"
   raw_path: "./raw_data/dailytalk_dt"
   preprocessed_path: "./preprocessed_data/dailytalk_cut"

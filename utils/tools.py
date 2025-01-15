@@ -47,6 +47,7 @@ def to_device(data, device):
          max_bert_length, sbert, h_bert, h_sbert, speaker,
          h_speaker, mel, m_length, max_mel_length, p_duration,
          t_duration, token_dur, pitch, energy, cutmel, cutw2v)
+
 def to_device_eval(data, device):
     if len(data) == 21:
         (text, t_length, max_text_length, bert, b_length,
@@ -65,24 +66,25 @@ def to_device_eval(data, device):
         h_sbert = h_sbert.to(device)
         speaker = speaker.to(device)
         h_speaker = h_speaker.to(device)
+        mel, m_length, max_mel_length, p_duration, t_duration, token_dur, pitch, energy, cutw2v = None, None, None, None, None, None, None, None, None
+        cutmel = cutmel.to(device)
         return (text, t_length, max_text_length, bert, b_length,
          max_bert_length, sbert, h_bert, h_sbert, speaker,
-         h_speaker, mel, m_length, max_mel_length, p_duration,
-         t_duration, token_dur, pitch, energy, cutmel, cutw2v)
-
-
+         h_speaker, None, None, None, None,
+         None, None, None, None, None, None)
 def log(
     logger, step=None, losses=None, fig=None, audio=None, sampling_rate=22050, tag=""
 ):
     if losses is not None:
         logger.add_scalar("Loss/total_loss", losses[0], step)
         logger.add_scalar("Loss/mel_loss", losses[1], step)
-        logger.add_scalar("Loss/mel_mle_loss", losses[2], step)
-        logger.add_scalar("Loss/pitch_loss", losses[3], step)
-        logger.add_scalar("Loss/energy_loss", losses[4], step)
-        logger.add_scalar("Loss/duration_loss", losses[5], step)
-        logger.add_scalar("Loss/token_duration_loss", losses[6], step)
-        logger.add_scalar("Loss/matching_loss", losses[7], step)
+        logger.add_scalar("Loss/post_mel_loss", losses[2], step)
+        logger.add_scalar("Loss/mel_mle_loss", losses[3], step)
+        logger.add_scalar("Loss/pitch_loss", losses[4], step)
+        logger.add_scalar("Loss/energy_loss", losses[5], step)
+        logger.add_scalar("Loss/duration_loss", losses[6], step)
+        logger.add_scalar("Loss/token_duration_loss", losses[7], step)
+        logger.add_scalar("Loss/matching_loss", losses[8], step)
 
 
     if fig is not None:

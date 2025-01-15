@@ -2,8 +2,9 @@ import torch
 import torch.nn as nn
 import math
 
-def MLELoss_det(z, z_mu, z_logs, logdet = None, x_mask = None):
-    l = torch.sum(z_logs) + 0.5 * torch.sum((z-z_mu)**2 * torch.exp(-2 * z_logs))
+def MLELoss_det(z, logdet = None, x_mask = None):
+    z_logs = torch.zeros_like(z*~x_mask)
+    l = torch.sum(z_logs) + 0.5 * torch.sum(z**2 * torch.exp(-2 * z_logs))
     if logdet is not None:
         l = l - torch.sum(logdet)
     if x_mask == None:
@@ -13,7 +14,16 @@ def MLELoss_det(z, z_mu, z_logs, logdet = None, x_mask = None):
     l = l + 0.5 * math.log(2 * math.pi)
     return l
 
-
+def MLELoss_det_z(z, z_mu, z_logs, logdet = None, x_mask = None):
+    l = torch.sum(z_logs) + 0.5 * torch.sum((z-z_mu)**2 * torch.exp(-2 * z_logs))
+    if logdet is not None:
+        l = l - torch.sum(logdet)
+    if x_mask == None:
+        l = l / torch.sum(torch.ones_like(z))
+    else:
+        l = l / torch.sum(torch.ones_like(z))
+    l = l + 0.5 * math.log(2 * math.pi)
+    return l
 
 class FittedLoss(nn.Module):
     """ FittedLoss """
@@ -47,7 +57,7 @@ class FittedLoss(nn.Module):
             phone_emotion_targets,
         ) = inputs[11:]
         (
-            (z, z_mu, z_logs, logdet),
+            (z, logdet),
             mel_predictions,
             pitch_predictions,
             energy_predictions,
@@ -60,10 +70,10 @@ class FittedLoss(nn.Module):
             _,
             _,
             mel_prosody,
-            #(phone_mu, phone_logs),
             phone_prosody,
             phone_emotion_predict,
-            pre_mel_prediction,
+            prenet_mel_prediction,
+            postnet_mel_prediction,
         ) = predictions
         src_masks = ~src_masks
         bert_masks = ~bert_masks
@@ -98,22 +108,32 @@ class FittedLoss(nn.Module):
         log_duration_predictions = log_duration_predictions.masked_select(src_masks)
         log_duration_targets = log_duration_targets.masked_select(src_masks)
 
-        pre_mel_loss = self.mae_loss(mel_targets, pre_mel_prediction)
+        pre_mel_loss = self.mae_loss(mel_targets, prenet_mel_prediction)
+        postnet_mel_loss = self.mae_loss(mel_targets, postnet_mel_prediction.transpose(-1,-2))
         pitch_loss = self.mse_loss(pitch_predictions, pitch_targets) #version 19
         energy_loss = self.mse_loss(energy_predictions, energy_targets) #version 19
         duration_loss = self.mse_loss(log_duration_predictions, log_duration_targets)
         token_duration_loss = self.mse_loss(log_token_duration_predictions, log_token_duration_targets)
 
-        mel_loss = MLELoss_det(z, z_mu, z_logs, logdet, ~mel_masks.unsqueeze(1))
-        #condition_loss = MLELoss_det(mel_prosody_detach, phone_mu, phone_logs, None, ~bert_masks.unsqueeze(-1))
+        mel_loss = MLELoss_det(z, logdet, ~mel_masks.unsqueeze(1))
         condition_loss = self.mse_loss(mel_prosody_detach, phone_prosody)
+
+        if step <=self.warmupstep:
+            condition_loss = condition_loss * 0
+            pitch_loss = pitch_loss * 0
+            energy_loss = energy_loss * 0
+
         total_loss = (
-                mel_loss + pre_mel_loss + duration_loss + pitch_loss + energy_loss + token_duration_loss + condition_loss
+                mel_loss + pre_mel_loss + postnet_mel_loss +
+                duration_loss +
+                pitch_loss + energy_loss +
+                token_duration_loss + condition_loss
         )
 
         return (
             total_loss,
             pre_mel_loss,
+            postnet_mel_loss,
             mel_loss,
             pitch_loss,
             energy_loss,

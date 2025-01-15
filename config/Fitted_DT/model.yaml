@@ -34,7 +34,7 @@ dialogue_predictor:
   dropout: 0.2
 
 flowdecoder:
-  n_blocks: 4
+  n_blocks: 6
   n_sqz: 2
   n_split: 4
   dilation_rate: 1
