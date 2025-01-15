@@ -1,0 +1,4 @@
+/preprocessed_data/*
+/wav2vec2_checkpoints/*
+/pretrained_models/*
+/raw_data/*
