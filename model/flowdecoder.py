@@ -12,7 +12,7 @@ class ActNorm(nn.Module):
         self.bias = nn.Parameter(torch.zeros(1, self.channels, 1))
         self.initialized = False
 
-    def forward(self, x, x_mask=None, speaker=None, gen=False):
+    def forward(self, x, x_mask=None, mel=None, gen=False):
         if x_mask is None:
             x_mask = torch.zeros(x.size(0), 1, x.size(2)).to(device=x.device, dtype = torch.bool)
         x_len = torch.sum(~x_mask, [1,2])
@@ -55,7 +55,7 @@ class InvConvNear(nn.Module):
         if torch.det(w_init) <0:
             w_init[:,0] = -1 * w_init[:,0]
             self.weight = nn.Parameter(w_init)
-    def forward(self, x, x_mask = None, speaker = None, gen = False):
+    def forward(self, x, x_mask = None, mel = None, gen = False):
         b, c, t = x.size()
         assert(c % self.n_split == 0)
         if x_mask is None:
@@ -92,18 +92,18 @@ class InvConvNear(nn.Module):
 class WN(nn.Module):
     def __init__(self, model_config):
         super(WN, self).__init__()
-        speaker_dim = model_config["transformer"]["encoder_hidden"]
+        mel_dim = model_config["dialogue_predictor"]["n_mels"]
         self.hidden_dim = model_config["flowdecoder"]["filter_channel"]
         dilation_rate= model_config["flowdecoder"]["dilation_rate"]
         self.n_layers = model_config["flowdecoder"]["n_layers"]
         kernel_size = model_config["flowdecoder"]["kernel_size"]
         dropout = model_config["flowdecoder"]["dropout"]
-
+        sqz = model_config["flowdecoder"]["n_sqz"]
         self.in_layers = nn.ModuleList()
         self.res_skip_layers= nn.ModuleList()
         self.drop = nn.Dropout(dropout)
 
-        cond_layer = nn.Conv1d(speaker_dim, 2*self.hidden_dim*self.n_layers, 1)
+        cond_layer = nn.Conv1d(mel_dim * sqz , 2*self.hidden_dim*self.n_layers, 1)
         self.cond_layer = nn.utils.weight_norm(cond_layer, name='weight')
 
         for i in range(self.n_layers):
@@ -121,21 +121,20 @@ class WN(nn.Module):
             res_skip_layer = nn.Conv1d(self.hidden_dim, res_skip_channels , 1)
             res_skip_layer = nn.utils.weight_norm(res_skip_layer, name = 'weight')
             self.res_skip_layers.append(res_skip_layer)
-    def forward(self,x, x_mask = None, speaker = None, gen = False):
+    def forward(self,x, x_mask = None, mel = None, gen = False):
         output=  torch.zeros_like(x)
         n_channels_tensor = torch.IntTensor([self.hidden_dim])
-
-        if speaker is not None:
-            speaker = self.cond_layer(speaker.unsqueeze(-1))
+        if mel is not None:
+            mel = self.cond_layer(mel)
         for i in range(self.n_layers):
             x_in = self.in_layers[i](x)
             x_in = self.drop(x_in)
-            if speaker is not None:
+            if mel is not None:
                 cond_offset = i * 2 * self.hidden_dim
-                speaker_l = speaker[:, cond_offset:cond_offset+2*self.hidden_dim,:]
+                mel_l = mel[:, cond_offset:cond_offset+2*self.hidden_dim,:]
             else:
-                speaker_l = torch.zeros_like(x_in)
-            acts = self.fused_add_tanh_sigmoid_multiply(x_in, speaker_l, n_channels_tensor)
+                mel_l = torch.zeros_like(x_in)
+            acts = self.fused_add_tanh_sigmoid_multiply(x_in, mel_l, n_channels_tensor)
             res_skip_acts = self.res_skip_layers[i](acts)
             if i <self.n_layers -1:
                 x = (x+res_skip_acts[:,:self.hidden_dim,:]).masked_fill(x_mask, 0)
@@ -174,14 +173,14 @@ class CouplingBlock(nn.Module):
         self.end = end
 
         self.wn = WN(model_config)
-    def forward(self, x, x_mask=None, speaker=None, gen=False):
+    def forward(self, x, x_mask=None, mel=None, gen=False):
         b, c, t = x.size()
         if x_mask is None:
             x_mask = 0
         x_0, x_1 = x[:,:self.inchannel//2], x[:,self.inchannel//2:]
 
         x = self.start(x_0).masked_fill(x_mask, 0)
-        x = self.wn(x, x_mask, speaker)
+        x = self.wn(x, x_mask, mel)
         out = self.end(x)
 
         z_0 = x_0
@@ -214,7 +213,7 @@ class FlowSpecDecoder(nn.Module):
             self.flows.append(InvConvNear(model_config))
             self.flows.append(CouplingBlock(model_config))
 
-    def forward(self, x, x_mask, speaker, gen = False):
+    def forward(self, x, x_mask, mel, gen = False):
         """
         x [b, hidden, length]
         x_mask [b, length]
@@ -228,14 +227,14 @@ class FlowSpecDecoder(nn.Module):
             flows = self.flows
             logdet_tot = 0
 
-        x, x_mask = self.squeeze(x, x_mask , sqz= self.n_sqz)
+        x, mel, x_mask = self.squeeze(x, x_mask , mel, sqz= self.n_sqz)
         for f in flows:
             if not gen:
-                x, logdet = f(x, x_mask, speaker = speaker, gen = gen)
+                x, logdet = f(x, x_mask, mel = mel, gen = gen)
                 logdet_tot += logdet
             else:
-                x, logdet = f(x, x_mask, speaker = speaker, gen = gen)
-        x, x_mask = self.unsqueeze(x, x_mask, sqz= self.n_sqz)
+                x, logdet = f(x, x_mask, mel = mel, gen = gen)
+        x, mel, x_mask = self.unsqueeze(x, x_mask, mel, sqz= self.n_sqz)
 
         return x, logdet_tot, x_mask
 
@@ -243,26 +242,34 @@ class FlowSpecDecoder(nn.Module):
         for f in self.flows:
             f.store_inverse()
 
-    def squeeze(self,x, x_mask=None, sqz = 2):
+    def squeeze(self,x, x_mask=None, g = None, sqz = 2):
         b, c, t = x.size()
         t = (t//sqz) * sqz
         x = x[:,:,:t]
         x_sqz = x.view(b, c, t//sqz, sqz)
         x_sqz = x_sqz.permute(0, 3, 1, 2).contiguous().view(b, c*sqz, t//sqz)
+        if g is not None:
+            _, c_g, t_x = g.size()
+            g_sqz = g[:, :, :t]
+            g_sqz = g_sqz.view(b, c_g, t_x//sqz, sqz)
+            g_sqz = g_sqz.permute(0, 3, 1, 2).contiguous().view(b, c_g*sqz, t_x//sqz)
         if x_mask is not None:
             x_mask = x_mask.unsqueeze(-2)
             x_mask = x_mask[:,:,sqz-1::sqz]
         else:
             x_mask = torch.zeros(b, 1, t//sqz).to(device = x.device, dtype = torch.bool)
-        return x_sqz.masked_fill(x_mask, 0), x_mask
+        return x_sqz.masked_fill(x_mask, 0), g_sqz.masked_fill(x_mask,0), x_mask
 
-    def unsqueeze(self, x, x_mask, sqz = 2):
+    def unsqueeze(self, x, x_mask, g= None, sqz = 2):
         b, c, t = x.size()
         x_unsqz = x.view(b, sqz, c//sqz, t)
         x_unsqz = x_unsqz.permute(0, 2, 3, 1).contiguous().view(b, c//sqz, t*sqz)
-
+        if g is not None:
+            _, c_g, t_x = g.size()
+            g_unsqz = g.view(b, sqz, c_g//sqz, t_x)
+            g_unsqz = g_unsqz.permute(0, 2, 3, 1).contiguous().view(b, c_g//sqz, t_x* sqz)
         if x_mask is not None:
             x_mask = x_mask.unsqueeze(-1).repeat(1, 1, 1, sqz).view(b, 1, t*sqz)
         else:
             x_mask = torch.zeros(b, 1, t*sqz).to(device = x.device, dtype = torch.bool)
-        return x_unsqz.masked_fill(x_mask, 0), x_mask.squeeze(1)
+        return x_unsqz.masked_fill(x_mask, 0), g_unsqz.masked_fill(x_mask, 0), x_mask.squeeze(1)

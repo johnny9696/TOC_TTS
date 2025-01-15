@@ -50,15 +50,15 @@ class mel_prosody(nn.Module):
             bidirectional=False,
             num_layers= 1,
         )
+
+        # v19 convolution to linear
         self.conv1d_1 = nn.Sequential(
-            nn.Conv1d(hidden_channel,hidden_channel, kernel, padding= kernel//2),
-            nn.BatchNorm1d(hidden_channel),
-            nn.ReLU()
+            nn.Conv1d(hidden_channel, hidden_channel, 1),
+            nn.ReLU(),
         )
         self.conv1d_2 = nn.Sequential(
-            nn.Conv1d(hidden_channel,hidden_channel, kernel, padding= kernel//2),
-            nn.BatchNorm1d(hidden_channel),
-            nn.ReLU()
+            nn.Conv1d(hidden_channel, hidden_channel, 1),
+            nn.ReLU(),
         )
 
         self.out_linear = nn.Conv1d(hidden_channel, hidden_channel, 1)
@@ -241,7 +241,7 @@ class history_dialogue_predictor(nn.Module):
 
         #length predictor
         log_token_duration = self.token_duration(bert, bert_mask)
-        if token_target is not None:
+        if token_target is None:
             t_round = torch.clamp(
                 (torch.round(torch.exp(log_token_duration) - 1)),
                 min=0,
